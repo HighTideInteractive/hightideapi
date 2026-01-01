@@ -1,0 +1,40 @@
+{
+  "codes": {
+    "ClR3k8DgV4dq": {
+      "createdBy": "723206183313211435",
+      "createdAt": 1767304234614,
+      "expiresAt": 1767304294614,
+      "used": true,
+      "usedAt": 1767304266548,
+      "usedForUserId": "1035329846529753119",
+      "reason": "testing"
+    },
+    "ljKpMlnMqivx": {
+      "createdBy": "751813944397791283",
+      "createdAt": 1767304570324,
+      "expiresAt": 1767304630324,
+      "used": true,
+      "usedAt": 1767304596660,
+      "usedForUserId": "751813944397791283",
+      "reason": "because"
+    },
+    "bSbKEnje0iJf": {
+      "createdBy": "751813944397791283",
+      "createdAt": 1767304735610,
+      "expiresAt": 1767304795610,
+      "used": true,
+      "usedAt": 1767304757759,
+      "usedForUserId": "751813944397791283",
+      "reason": "."
+    },
+    "oTBOcwJ61k77": {
+      "createdBy": "723206183313211435",
+      "createdAt": 1767304928771,
+      "expiresAt": 1767304988771,
+      "used": true,
+      "usedAt": 1767304949547,
+      "usedForUserId": "751813944397791283",
+      "reason": "testing"
+    }
+  }
+}

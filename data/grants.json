@@ -1,0 +1,17 @@
+{
+  "grants": {
+    "751813944397791283": {
+      "expiresAt": 1767391349972,
+      "grantedBy": "723206183313211435",
+      "grantedAt": 1767304949972,
+      "reason": "testing stuff",
+      "authcode": "oTBOcwJ61k77"
+    }
+  },
+  "723206183313211435": {
+    "expires": 1767308472118,
+    "by": "723206183313211435",
+    "reason": "Alex's testing",
+    "code": "ce4c17ed9217492d"
+  }
+}
