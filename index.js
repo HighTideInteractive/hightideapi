@@ -360,4 +360,5 @@ async function logAuditEntryIfSpecial(guild, entry) {
     )
     .setTimestamp(new Date(entry.createdTimestamp || Date.now()));
 
-  await sendEmbed(guild, CONFIG.S
+  await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
+}
