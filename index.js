@@ -29,20 +29,28 @@ const {
    (MUST RUN FIRST)
 ========================= */
 
+const http = require("http");
+
 const PORT = process.env.PORT || 3000;
 
-http
-  .createServer((req, res) => {
-    if (req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      return res.end("OK");
-    }
+const server = http.createServer((req, res) => {
+  if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
-    return res.end("Bot running");
-  })
-  .listen(PORT, "0.0.0.0", () => {
-    console.log("✅ Listening on port", PORT);
-  });
+    return res.end("OK");
+  }
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot running");
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log("✅ Listening on port", PORT);
+});
+
+// If the server fails, you WANT to see it in logs:
+server.on("error", (err) => {
+  console.error("❌ HTTP server error:", err);
+});
+
 
 console.log("✅ index.js started");
 
