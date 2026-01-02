@@ -1,7 +1,20 @@
+/**
+ * index.js — Special Perms Bot + Audit Logging + Railway Health Endpoint
+ *
+ * REQUIRED ENV VARS (Railway Variables or local .env):
+ *  - DISCORD_TOKEN
+ *  - CLIENT_ID
+ *  - GUILD_ID
+ * Railway also provides PORT automatically.
+ */
+
 require("dotenv").config();
+
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const http = require("http");
+
 const {
   Client,
   GatewayIntentBits,
@@ -12,37 +25,48 @@ const {
 } = require("discord.js");
 
 /* =========================
+   RAILWAY PUBLIC DOMAIN FIX
+   (MUST RUN FIRST)
+========================= */
+
+const PORT = process.env.PORT || 3000;
+
+http
+  .createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      return res.end("OK");
+    }
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end("Bot running");
+  })
+  .listen(PORT, "0.0.0.0", () => {
+    console.log("✅ Listening on port", PORT);
+  });
+
+console.log("✅ index.js started");
+
+/* Log crashes clearly in Railway */
+process.on("unhandledRejection", (e) => console.error("UNHANDLED REJECTION:", e));
+process.on("uncaughtException", (e) => console.error("UNCAUGHT EXCEPTION:", e));
+
+/* =========================
    CONFIG (YOUR IDS)
 ========================= */
 const CONFIG = {
-  // Roles allowed to run /authcodegen
-  AUTHCODEGEN_ROLE_IDS: [
-    "1385085079809687714",
-    "1428945562782404718",
-  ],
-
-  // Role granted temporarily
+  AUTHCODEGEN_ROLE_IDS: ["1385085079809687714", "1428945562782404718"],
   SPECIAL_ROLE_ID: "1456387188517372018",
+  SERVERPERMS_ALLOWED_ROLE_IDS: ["1456390190951305267"],
 
-  // Who can run /serverpermissions and /revokepermissions
-  SERVERPERMS_ALLOWED_ROLE_IDS: [
-    "1456390190951305267",
-  ],
-
-  // Channels
   AUTH_LOG_CHANNEL_ID: "1456391810074018023",
   PERM_LOG_CHANNEL_ID: "1456391918383661382",
   SPECIAL_ACTIVITY_LOG_CHANNEL_ID: "1456391963560382647",
 
-  // Auth code settings
   AUTHCODE_TTL_MS: 60_000,
-
-  // Grant expiry enforcement + audit polling
   EXPIRY_CHECK_INTERVAL_MS: 10_000,
   AUDIT_POLL_INTERVAL_MS: 3000,
 
-  // Embed color
-  EMBED_COLOR: 0xE53935,
+  EMBED_COLOR: 0xe53935,
 };
 
 /* =========================
@@ -51,7 +75,7 @@ const CONFIG = {
 const DATA_DIR = path.join(__dirname, "data");
 const AUTH_FILE = path.join(DATA_DIR, "authcodes.json");
 const GRANTS_FILE = path.join(DATA_DIR, "grants.json");
-const STATE_FILE = path.join(DATA_DIR, "state.json"); // stores last seen audit id
+const STATE_FILE = path.join(DATA_DIR, "state.json"); // last seen audit entry id
 
 function ensureFiles() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
@@ -59,10 +83,15 @@ function ensureFiles() {
   if (!fs.existsSync(GRANTS_FILE)) fs.writeFileSync(GRANTS_FILE, JSON.stringify({ grants: {} }, null, 2));
   if (!fs.existsSync(STATE_FILE)) fs.writeFileSync(STATE_FILE, JSON.stringify({ lastAuditId: null }, null, 2));
 }
-function readJson(file) { return JSON.parse(fs.readFileSync(file, "utf8")); }
-function writeJson(file, obj) { fs.writeFileSync(file, JSON.stringify(obj, null, 2)); }
-function now() { return Date.now(); }
-
+function readJson(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+function writeJson(file, obj) {
+  fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+}
+function now() {
+  return Date.now();
+}
 ensureFiles();
 
 /* =========================
@@ -89,7 +118,6 @@ function prettyDuration(input) {
 /* =========================
    AUTH CODES
 ========================= */
-// authcodes.json: { codes: { CODE: { createdBy, createdAt, expiresAt, used, usedAt, usedForUserId, reason } } }
 function createAuthCode(createdBy, reason) {
   const db = readJson(AUTH_FILE);
   const code = crypto.randomBytes(9).toString("base64url");
@@ -134,7 +162,6 @@ function cleanupExpiredAuthCodes() {
 /* =========================
    GRANTS
 ========================= */
-// grants.json: { grants: { userId: { expiresAt, grantedBy, grantedAt, reason, authcode } } }
 function setGrant(userId, grantedBy, expiresAt, reason, authcode) {
   const db = readJson(GRANTS_FILE);
   db.grants[userId] = { expiresAt, grantedBy, grantedAt: now(), reason, authcode };
@@ -158,7 +185,7 @@ function listExpiredGrants() {
 }
 
 /* =========================
-   DISCORD CLIENT
+   CLIENT
 ========================= */
 const client = new Client({
   intents: [
@@ -172,7 +199,7 @@ const client = new Client({
 });
 
 /* =========================
-   LOGGING HELPERS
+   LOG HELPERS
 ========================= */
 async function fetchChannel(guild, id) {
   return guild.channels.fetch(id).catch(() => null);
@@ -180,7 +207,7 @@ async function fetchChannel(guild, id) {
 async function sendEmbed(guild, channelId, embed) {
   const ch = await fetchChannel(guild, channelId);
   if (!ch) return;
-  try { await ch.send({ embeds: [embed] }); } catch (e) { console.error("Log send failed:", e); }
+  await ch.send({ embeds: [embed] }).catch((e) => console.error("Log send failed:", e));
 }
 
 function styledEmbed({ title, invokerUser, dateMs, lengthText, reason, authcode, targetUserId, extraLines }) {
@@ -192,7 +219,6 @@ function styledEmbed({ title, invokerUser, dateMs, lengthText, reason, authcode,
     .setTimestamp(new Date(dateMs || now()));
 
   if (avatar) e.setThumbnail(avatar);
-
   if (extraLines) e.setDescription(extraLines);
 
   const fields = [];
@@ -208,22 +234,20 @@ function styledEmbed({ title, invokerUser, dateMs, lengthText, reason, authcode,
 
 function memberHasAnyRole(member, roleIds) {
   if (!Array.isArray(roleIds) || roleIds.length === 0) return false;
-  return roleIds.some(id => member.roles.cache.has(id));
+  return roleIds.some((id) => member.roles.cache.has(id));
 }
 
 /* =========================
    SPECIAL CHECK (ROLE OR TIMER) + CACHE
 ========================= */
-const specialCache = new Map(); // userId -> { val: bool, at: ms }
+const specialCache = new Map(); // userId -> { val, at }
 async function isSpecialMember(guild, userId) {
   const cached = specialCache.get(userId);
   if (cached && now() - cached.at < 15_000) return cached.val;
 
-  // Timer file
   const g = getGrant(userId);
   const timerActive = !!(g && g.expiresAt > now());
 
-  // Role membership
   const member = await guild.members.fetch(userId).catch(() => null);
   const hasRole = !!member?.roles?.cache?.has(CONFIG.SPECIAL_ROLE_ID);
 
@@ -245,42 +269,38 @@ async function enforceExpirations() {
   if (!guild) return;
 
   for (const userId of expired) {
-    try {
-      const member = await guild.members.fetch(userId).catch(() => null);
-      if (member) {
-        await member.roles.remove(CONFIG.SPECIAL_ROLE_ID, "Temporary permissions expired").catch(() => {});
-      }
-      removeGrant(userId);
-
-      const embed = new EmbedBuilder()
-        .setColor(CONFIG.EMBED_COLOR)
-        .setTitle("Role removed (expired)")
-        .setDescription(`User: <@${userId}> (${userId})\nExpired automatically.`)
-        .setTimestamp(new Date());
-
-      await sendEmbed(guild, CONFIG.PERM_LOG_CHANNEL_ID, embed);
-    } catch (e) {
-      console.error("Expiration enforcement error:", e);
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (member) {
+      await member.roles.remove(CONFIG.SPECIAL_ROLE_ID, "Temporary permissions expired").catch(() => {});
     }
+    removeGrant(userId);
+
+    const embed = new EmbedBuilder()
+      .setColor(CONFIG.EMBED_COLOR)
+      .setTitle("Role removed (expired)")
+      .setDescription(`User: <@${userId}> (${userId})\nExpired automatically.`)
+      .setTimestamp(new Date());
+
+    await sendEmbed(guild, CONFIG.PERM_LOG_CHANNEL_ID, embed);
   }
 }
 
 /* =========================
-   PERMISSION / ROLE DIFF HELPERS
+   ROLE PERMISSION DIFF
 ========================= */
 function diffPermissions(oldPerms, newPerms) {
   const oldSet = new Set(new PermissionsBitField(oldPerms).toArray());
   const newSet = new Set(new PermissionsBitField(newPerms).toArray());
-  const added = [...newSet].filter(p => !oldSet.has(p));
-  const removed = [...oldSet].filter(p => !newSet.has(p));
+  const added = [...newSet].filter((p) => !oldSet.has(p));
+  const removed = [...oldSet].filter((p) => !newSet.has(p));
   return { added, removed };
 }
 
 /* =========================
-   AUDIT CAPTURE: LIVE + POLLING
+   AUDIT: LIVE + POLLING FALLBACK
 ========================= */
 function actionNameFromId(actionId) {
-  return Object.keys(AuditLogEvent).find(k => AuditLogEvent[k] === actionId) || `Action ${actionId}`;
+  return Object.keys(AuditLogEvent).find((k) => AuditLogEvent[k] === actionId) || `Action ${actionId}`;
 }
 
 async function logAuditEntryIfSpecial(guild, entry, sourceTag) {
@@ -297,26 +317,29 @@ async function logAuditEntryIfSpecial(guild, entry, sourceTag) {
       ? `${entry.target?.name ?? entry.target?.username ?? "Target"} (${entry.target.id})`
       : "Unknown target";
 
-  const changesPreview = Array.isArray(entry.changes) && entry.changes.length
-    ? entry.changes.slice(0, 10).map(c => `• \`${c.key}\`: ${JSON.stringify(c.old)} → ${JSON.stringify(c.new)}`).join("\n")
-    : "(no changes provided)";
+  const changesPreview =
+    Array.isArray(entry.changes) && entry.changes.length
+      ? entry.changes
+          .slice(0, 12)
+          .map((c) => `• \`${c.key}\`: ${JSON.stringify(c.old)} → ${JSON.stringify(c.new)}`)
+          .join("\n")
+      : "(no changes provided)";
 
   const embed = new EmbedBuilder()
     .setColor(CONFIG.EMBED_COLOR)
-    .setTitle(`Admin action logged ${sourceTag ? `(${sourceTag})` : ""}`)
+    .setTitle(`Admin action logged (${sourceTag})`)
     .setDescription(
       `Executor: <@${executorId}> (${executorId})\n` +
-      `Action: **${action}**\n` +
-      `Target: ${targetText}\n` +
-      (entry.reason ? `Reason: ${entry.reason}\n` : "") +
-      `\n**Changes:**\n${changesPreview}`
+        `Action: **${action}**\n` +
+        `Target: ${targetText}\n` +
+        (entry.reason ? `Reason: ${entry.reason}\n` : "") +
+        `\n**Changes:**\n${changesPreview}`
     )
     .setTimestamp(new Date(entry.createdTimestamp || Date.now()));
 
   await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
 }
 
-// Live (may not fire reliably in all environments)
 client.on("guildAuditLogEntryCreate", async (entry, guild) => {
   try {
     await logAuditEntryIfSpecial(guild, entry, "live");
@@ -325,7 +348,6 @@ client.on("guildAuditLogEntryCreate", async (entry, guild) => {
   }
 });
 
-// Polling fallback (guaranteed to match what you see in Audit Logs)
 async function pollAuditLogs() {
   const guild = await client.guilds.fetch(process.env.GUILD_ID).catch(() => null);
   if (!guild) return;
@@ -334,13 +356,12 @@ async function pollAuditLogs() {
   if (!logs) return;
 
   const entries = [...logs.entries.values()]; // newest first
-  if (entries.length === 0) return;
+  if (!entries.length) return;
 
   const state = readJson(STATE_FILE);
   const lastId = state.lastAuditId;
 
   if (!lastId) {
-    // initialize to newest so we don't dump old logs
     state.lastAuditId = entries[0].id;
     writeJson(STATE_FILE, state);
     return;
@@ -351,14 +372,11 @@ async function pollAuditLogs() {
     if (e.id === lastId) break;
     newOnes.push(e);
   }
+  if (!newOnes.length) return;
 
-  if (newOnes.length === 0) return;
-
-  // update last seen to newest
   state.lastAuditId = entries[0].id;
   writeJson(STATE_FILE, state);
 
-  // log oldest -> newest
   newOnes.reverse();
   for (const entry of newOnes) {
     await logAuditEntryIfSpecial(guild, entry, "polled");
@@ -369,7 +387,7 @@ async function pollAuditLogs() {
    READY
 ========================= */
 client.once("ready", async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`✅ Discord logged in as ${client.user.tag}`);
 
   await enforceExpirations();
   setInterval(enforceExpirations, CONFIG.EXPIRY_CHECK_INTERVAL_MS);
@@ -377,7 +395,7 @@ client.once("ready", async () => {
 });
 
 /* =========================
-   SLASH COMMANDS
+   COMMANDS
 ========================= */
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
@@ -387,10 +405,8 @@ client.on("interactionCreate", async (interaction) => {
   const invokerMember = await guild.members.fetch(interaction.user.id).catch(() => null);
   if (!invokerMember) return interaction.reply({ content: "Could not fetch your member info.", ephemeral: true });
 
-  // /authcodegen
   if (interaction.commandName === "authcodegen") {
-    const canGen = CONFIG.AUTHCODEGEN_ROLE_IDS.some(rid => invokerMember.roles.cache.has(rid));
-    if (!canGen) {
+    if (!memberHasAnyRole(invokerMember, CONFIG.AUTHCODEGEN_ROLE_IDS)) {
       return interaction.reply({ content: "You don’t have permission to generate auth codes.", ephemeral: true });
     }
 
@@ -398,7 +414,6 @@ client.on("interactionCreate", async (interaction) => {
     const code = createAuthCode(interaction.user.id, reason);
     const expiresAt = now() + CONFIG.AUTHCODE_TTL_MS;
 
-    // EPHEMERAL code (only invoker sees it)
     await interaction.reply({
       content: `✅ Auth code (expires <t:${Math.floor(expiresAt / 1000)}:R>):\n\`${code}\``,
       ephemeral: true,
@@ -411,19 +426,15 @@ client.on("interactionCreate", async (interaction) => {
       lengthText: "1 minute",
       reason,
       authcode: code,
-      targetUserId: null,
     });
 
     await sendEmbed(guild, CONFIG.AUTH_LOG_CHANNEL_ID, embed);
     return;
   }
 
-  // /serverpermissions
   if (interaction.commandName === "serverpermissions") {
-    if (CONFIG.SERVERPERMS_ALLOWED_ROLE_IDS?.length) {
-      if (!memberHasAnyRole(invokerMember, CONFIG.SERVERPERMS_ALLOWED_ROLE_IDS)) {
-        return interaction.reply({ content: "You don’t have permission to use this command.", ephemeral: true });
-      }
+    if (!memberHasAnyRole(invokerMember, CONFIG.SERVERPERMS_ALLOWED_ROLE_IDS)) {
+      return interaction.reply({ content: "You don’t have permission to use this command.", ephemeral: true });
     }
 
     const userId = interaction.options.getString("userid", true).trim();
@@ -450,15 +461,14 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "That user is not in this server (or I can’t fetch them).", ephemeral: true });
     }
 
-    try {
-      await targetMember.roles.add(CONFIG.SPECIAL_ROLE_ID, reason);
-    } catch (e) {
-      console.error(e);
-      return interaction.reply({
-        content: "I couldn’t add the role. Check Manage Roles + role hierarchy (bot role must be above the special role).",
-        ephemeral: true,
-      });
-    }
+    await targetMember.roles
+      .add(CONFIG.SPECIAL_ROLE_ID, reason)
+      .catch(() =>
+        interaction.reply({
+          content: "I couldn’t add the role. Check Manage Roles + role hierarchy (bot role must be above the special role).",
+          ephemeral: true,
+        })
+      );
 
     const expiresAt = now() + durationMs;
     setGrant(userId, interaction.user.id, expiresAt, reason, authcode);
@@ -483,12 +493,9 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  // /revokepermissions
   if (interaction.commandName === "revokepermissions") {
-    if (CONFIG.SERVERPERMS_ALLOWED_ROLE_IDS?.length) {
-      if (!memberHasAnyRole(invokerMember, CONFIG.SERVERPERMS_ALLOWED_ROLE_IDS)) {
-        return interaction.reply({ content: "You don’t have permission to use this command.", ephemeral: true });
-      }
+    if (!memberHasAnyRole(invokerMember, CONFIG.SERVERPERMS_ALLOWED_ROLE_IDS)) {
+      return interaction.reply({ content: "You don’t have permission to use this command.", ephemeral: true });
     }
 
     const userId = interaction.options.getString("userid", true).trim();
@@ -500,23 +507,12 @@ client.on("interactionCreate", async (interaction) => {
 
     const targetMember = await guild.members.fetch(userId).catch(() => null);
     if (targetMember) {
-      try {
-        await targetMember.roles.remove(CONFIG.SPECIAL_ROLE_ID, reason);
-      } catch (e) {
-        console.error(e);
-        return interaction.reply({
-          content: "I couldn’t remove the role. Check permissions/role hierarchy.",
-          ephemeral: true,
-        });
-      }
+      await targetMember.roles.remove(CONFIG.SPECIAL_ROLE_ID, reason).catch(() => {});
     }
 
     removeGrant(userId);
 
-    await interaction.reply({
-      content: `✅ Revoked special role from <@${userId}>.`,
-      ephemeral: true,
-    });
+    await interaction.reply({ content: `✅ Revoked special role from <@${userId}>.`, ephemeral: true });
 
     const embed = new EmbedBuilder()
       .setColor(CONFIG.EMBED_COLOR)
@@ -525,7 +521,7 @@ client.on("interactionCreate", async (interaction) => {
       .addFields(
         { name: "Date", value: `<t:${Math.floor(now() / 1000)}:f>`, inline: true },
         { name: "User ID", value: `${userId}`, inline: true },
-        { name: "Reason", value: reason, inline: false },
+        { name: "Reason", value: reason, inline: false }
       )
       .setDescription(`Target: <@${userId}>`)
       .setTimestamp(new Date());
@@ -536,7 +532,7 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 /* =========================
-   SPECIAL USER MESSAGE LOGS
+   SPECIAL USER ACTIVITY LOGS
 ========================= */
 client.on("messageCreate", async (message) => {
   try {
@@ -548,7 +544,7 @@ client.on("messageCreate", async (message) => {
 
     const content = message.content?.length ? message.content : "(no text content)";
     const attachments = message.attachments?.size
-      ? `\n\nAttachments:\n${[...message.attachments.values()].map(a => a.url).join("\n")}`
+      ? `\n\nAttachments:\n${[...message.attachments.values()].map((a) => a.url).join("\n")}`
       : "";
 
     const embed = new EmbedBuilder()
@@ -556,9 +552,9 @@ client.on("messageCreate", async (message) => {
       .setTitle("Message sent (special user)")
       .setDescription(
         `User: <@${message.author.id}> (${message.author.id})\n` +
-        `Channel: <#${message.channel.id}>\n\n` +
-        `**Content:**\n${content.slice(0, 1500)}${content.length > 1500 ? "…" : ""}` +
-        attachments
+          `Channel: <#${message.channel.id}>\n\n` +
+          `**Content:**\n${content.slice(0, 1500)}${content.length > 1500 ? "…" : ""}` +
+          attachments
       )
       .setTimestamp(new Date());
 
@@ -586,9 +582,9 @@ client.on("messageUpdate", async (oldMsg, newMsg) => {
       .setTitle("Message edited (special user)")
       .setDescription(
         `User: <@${newMsg.author.id}> (${newMsg.author.id})\n` +
-        `Channel: <#${newMsg.channel.id}>\n\n` +
-        `**Before:**\n${String(before).slice(0, 900)}\n\n` +
-        `**After:**\n${String(after).slice(0, 900)}`
+          `Channel: <#${newMsg.channel.id}>\n\n` +
+          `**Before:**\n${String(before).slice(0, 900)}\n\n` +
+          `**After:**\n${String(after).slice(0, 900)}`
       )
       .setTimestamp(new Date());
 
@@ -613,8 +609,8 @@ client.on("messageDelete", async (message) => {
       .setTitle("Message deleted (special user)")
       .setDescription(
         `User: <@${message.author.id}> (${message.author.id})\n` +
-        `Channel: <#${message.channel.id}>\n\n` +
-        `**Content:**\n${content.slice(0, 1500)}`
+          `Channel: <#${message.channel.id}>\n\n` +
+          `**Content:**\n${content.slice(0, 1500)}`
       )
       .setTimestamp(new Date());
 
@@ -624,11 +620,7 @@ client.on("messageDelete", async (message) => {
   }
 });
 
-/* =========================
-   REAL-TIME: VOICE + NICKNAME + CHANNEL + ROLE UPDATES
-========================= */
-
-// Voice join/leave/move + mute/deafen toggles
+/* Voice join/leave/move + mute/deafen toggles */
 client.on("voiceStateUpdate", async (oldState, newState) => {
   try {
     const guild = newState.guild;
@@ -655,7 +647,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     const embed = new EmbedBuilder()
       .setColor(CONFIG.EMBED_COLOR)
       .setTitle("Voice activity (special user)")
-      .setDescription(`User: <@${member.id}> (${member.id})\n\n${changes.map(x => `• ${x}`).join("\n")}`)
+      .setDescription(`User: <@${member.id}> (${member.id})\n\n${changes.map((x) => `• ${x}`).join("\n")}`)
       .setTimestamp(new Date());
 
     await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
@@ -664,13 +656,12 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   }
 });
 
-// Nickname changes (log when special user changes own nickname OR special user changes someone else's nickname via audit polling)
+/* Nickname changes for special users */
 client.on("guildMemberUpdate", async (oldMember, newMember) => {
   try {
     if (oldMember.nickname === newMember.nickname) return;
 
-    const guild = newMember.guild;
-    const special = await isSpecialMember(guild, newMember.id);
+    const special = await isSpecialMember(newMember.guild, newMember.id);
     if (!special) return;
 
     const embed = new EmbedBuilder()
@@ -678,76 +669,47 @@ client.on("guildMemberUpdate", async (oldMember, newMember) => {
       .setTitle("Nickname changed (special user)")
       .setDescription(
         `User: <@${newMember.id}> (${newMember.id})\n` +
-        `Old: **${oldMember.nickname || "None"}**\n` +
-        `New: **${newMember.nickname || "None"}**`
+          `Old: **${oldMember.nickname || "None"}**\n` +
+          `New: **${newMember.nickname || "None"}**`
       )
       .setTimestamp(new Date());
 
-    await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
+    await sendEmbed(newMember.guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
   } catch (e) {
     console.error("guildMemberUpdate(nickname) error:", e);
   }
 });
 
-// Channel create/delete/update (these events don’t include executor reliably; audit polling/live will capture executor)
-// Still useful for “real-time” visibility.
-client.on("channelCreate", async (channel) => {
-  try {
-    const guild = channel.guild;
-    const embed = new EmbedBuilder()
-      .setColor(CONFIG.EMBED_COLOR)
-      .setTitle("Channel created")
-      .setDescription(`Channel: <#${channel.id}> (${channel.name})`)
-      .setTimestamp(new Date());
-    await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
-  } catch {}
-});
-
-client.on("channelDelete", async (channel) => {
-  try {
-    const guild = channel.guild;
-    const embed = new EmbedBuilder()
-      .setColor(CONFIG.EMBED_COLOR)
-      .setTitle("Channel deleted")
-      .setDescription(`Channel: **${channel.name}** (${channel.id})`)
-      .setTimestamp(new Date());
-    await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
-  } catch {}
-});
-
+/* Channel update visibility (executor comes via audit polling) */
 client.on("channelUpdate", async (oldCh, newCh) => {
   try {
-    const guild = newCh.guild;
     const changes = [];
     if (oldCh.name !== newCh.name) changes.push(`Name: **${oldCh.name}** → **${newCh.name}**`);
-    if ("topic" in oldCh && oldCh.topic !== newCh.topic) changes.push(`Topic changed`);
-    if ("nsfw" in oldCh && oldCh.nsfw !== newCh.nsfw) changes.push(`NSFW: **${oldCh.nsfw}** → **${newCh.nsfw}**`);
-    if ("rateLimitPerUser" in oldCh && oldCh.rateLimitPerUser !== newCh.rateLimitPerUser) changes.push(`Slowmode changed`);
+    if ("topic" in oldCh && oldCh.topic !== newCh.topic) changes.push("Topic changed");
+    if ("rateLimitPerUser" in oldCh && oldCh.rateLimitPerUser !== newCh.rateLimitPerUser) changes.push("Slowmode changed");
     if (!changes.length) return;
 
     const embed = new EmbedBuilder()
       .setColor(CONFIG.EMBED_COLOR)
       .setTitle("Channel updated")
-      .setDescription(`Channel: <#${newCh.id}>\n\n${changes.map(x => `• ${x}`).join("\n")}`)
+      .setDescription(`Channel: <#${newCh.id}>\n\n${changes.map((x) => `• ${x}`).join("\n")}`)
       .setTimestamp(new Date());
 
-    await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
+    await sendEmbed(newCh.guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
   } catch (e) {
     console.error("channelUpdate error:", e);
   }
 });
 
-// Role permission diffs in detail + name changes
+/* Role permission diffs */
 client.on("roleUpdate", async (oldRole, newRole) => {
   try {
-    const guild = newRole.guild;
-
     const changes = [];
     if (oldRole.name !== newRole.name) changes.push(`Name: **${oldRole.name}** → **${newRole.name}**`);
 
     const { added, removed } = diffPermissions(oldRole.permissions, newRole.permissions);
-    if (added.length) changes.push(`Permissions added:\n${added.map(p => `• ${p}`).join("\n")}`);
-    if (removed.length) changes.push(`Permissions removed:\n${removed.map(p => `• ${p}`).join("\n")}`);
+    if (added.length) changes.push(`Permissions added:\n${added.map((p) => `• ${p}`).join("\n")}`);
+    if (removed.length) changes.push(`Permissions removed:\n${removed.map((p) => `• ${p}`).join("\n")}`);
 
     if (!changes.length) return;
 
@@ -757,27 +719,30 @@ client.on("roleUpdate", async (oldRole, newRole) => {
       .setDescription(`Role: **${newRole.name}** (${newRole.id})\n\n${changes.join("\n\n")}`)
       .setTimestamp(new Date());
 
-    await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
+    await sendEmbed(newRole.guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
   } catch (e) {
     console.error("roleUpdate error:", e);
   }
 });
 
-// Webhook updates: fires when any webhook changes in a channel (executor still comes from audit logs)
+/* Webhook updates: who did it will show via audit polling */
 client.on("webhookUpdate", async (channel) => {
   try {
-    const guild = channel.guild;
     const embed = new EmbedBuilder()
       .setColor(CONFIG.EMBED_COLOR)
       .setTitle("Webhook update detected")
-      .setDescription(`Channel: <#${channel.id}> (audit logs will show who did it)`)
+      .setDescription(`Channel: <#${channel.id}> (see audit log entries for executor)`)
       .setTimestamp(new Date());
 
-    await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
+    await sendEmbed(channel.guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
   } catch {}
 });
 
 /* =========================
-   START
+   LOGIN
 ========================= */
-client.login(process.env.DISCORD_TOKEN);
+if (!process.env.DISCORD_TOKEN) {
+  console.error("❌ DISCORD_TOKEN missing. Set it in Railway Variables.");
+} else {
+  client.login(process.env.DISCORD_TOKEN).catch((e) => console.error("❌ Discord login failed:", e));
+}
