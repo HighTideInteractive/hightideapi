@@ -1,10 +1,14 @@
 /**
- * index.js — Special Perm Bot (Railway-ready) + Logs + Audit Monitoring
+ * index.js — Special Perm Bot (Railway-ready) + Logs + Audit Monitoring + Roblox Kill Logs
  *
  * REQUIRED Railway Variables (or local .env):
  *   DISCORD_TOKEN
  *   CLIENT_ID
  *   GUILD_ID
+ *
+ * NEW Railway Variables for Roblox kill logs:
+ *   KILL_LOG_CHANNEL_ID
+ *   KILL_LOG_SECRET
  *
  * IMPORTANT:
  * - Railway gives PORT automatically; we must listen on it for public domain.
@@ -38,36 +42,16 @@ const CONFIG = {
   PERM_LOG_CHANNEL_ID: "1456391918383661382",
   SPECIAL_ACTIVITY_LOG_CHANNEL_ID: "1456391963560382647",
 
+  // Roblox kill logs
+  KILL_LOG_CHANNEL_ID: process.env.KILL_LOG_CHANNEL_ID || "", // set in Railway Variables
+  KILL_LOG_SECRET: process.env.KILL_LOG_SECRET || "", // set in Railway Variables
+
   AUTHCODE_TTL_MS: 60_000,          // 1 minute
   EXPIRY_CHECK_INTERVAL_MS: 10_000, // role expiry check
   AUDIT_POLL_INTERVAL_MS: 3000,     // audit polling
 
   EMBED_COLOR: 0xe53935,
 };
-
-/* =========================
-   RAILWAY HEALTH SERVER
-========================= */
-const PORT = process.env.PORT || 3000;
-
-const webServer = http.createServer((req, res) => {
-  if (req.url === "/health") {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    return res.end("OK");
-  }
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Bot running");
-});
-
-webServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Listening on port ${PORT}`);
-});
-
-webServer.on("error", (err) => {
-  console.error("❌ HTTP server error:", err);
-});
-
-console.log("✅ index.js started");
 
 /* =========================
    CRASH LOGS
@@ -524,6 +508,131 @@ client.on("roleUpdate", async (oldRole, newRole) => {
 });
 
 /* =========================
+   ROBLOX KILL LOG HELPERS
+========================= */
+function robloxProfileUrl(userId) {
+  return `https://www.roblox.com/users/${userId}/profile`;
+}
+
+// This one is a direct image URL (works as Discord thumbnail)
+function robloxHeadshotImageUrl(userId) {
+  return `https://www.roblox.com/headshot-thumbnail/image?userId=${userId}&width=150&height=150&format=png`;
+}
+
+function buildRobloxKillEmbed({ victimName, victimUserId, killerName, killerUserId, timeMs }) {
+  const victimLink = robloxProfileUrl(victimUserId);
+  const killerLink = robloxProfileUrl(killerUserId);
+
+  const killedBlock =
+    `Killed User (Unarmed)\n` +
+    `[${victimName}](${victimLink}) [Target]`;
+
+  const killerBlock =
+    `[${killerName}](${killerLink}) [Citizen]`;
+
+  return new EmbedBuilder()
+    .setColor(0xe53935) // RED like you asked
+    .setTitle("Los Santos Kill Logs")
+    .setURL(victimLink) // clicking title opens victim profile
+    .setThumbnail(robloxHeadshotImageUrl(victimUserId))
+    .addFields(
+      { name: "Game", value: killedBlock, inline: false },
+      { name: "Killer", value: killerBlock, inline: false },
+      { name: "Time", value: `<t:${Math.floor((timeMs || Date.now()) / 1000)}:F>`, inline: false }
+    )
+    .setFooter({ text: `Roblox ID: ${victimUserId}` })
+    .setTimestamp(new Date(timeMs || Date.now()));
+}
+
+/* =========================
+   RAILWAY HEALTH SERVER + ROBLOX ENDPOINT
+   (single server only)
+========================= */
+const PORT = process.env.PORT || 3000;
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
+}
+
+const webServer = http.createServer(async (req, res) => {
+  // health check
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    return res.end("OK");
+  }
+
+  // roblox kill logs
+  if (req.method === "POST" && req.url === "/roblox/kill") {
+    try {
+      if (!CONFIG.KILL_LOG_CHANNEL_ID || !CONFIG.KILL_LOG_SECRET) {
+        res.writeHead(500, { "Content-Type": "text/plain" });
+        return res.end("Kill log not configured");
+      }
+
+      const secret = req.headers["x-killlog-secret"];
+      if (secret !== CONFIG.KILL_LOG_SECRET) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        return res.end("Unauthorized");
+      }
+
+      if (!client.isReady()) {
+        res.writeHead(503, { "Content-Type": "text/plain" });
+        return res.end("Bot not ready");
+      }
+
+      const raw = await readBody(req);
+      const body = JSON.parse(raw || "{}");
+
+      const victimName = String(body.victimName || "").trim();
+      const victimUserId = String(body.victimUserId || "").trim();
+      const killerName = String(body.killerName || "").trim();
+      const killerUserId = String(body.killerUserId || "").trim();
+      const timeMs = typeof body.timeMs === "number" ? body.timeMs : Date.now();
+
+      if (!victimName || !victimUserId || !killerName || !killerUserId) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        return res.end("Missing fields");
+      }
+
+      const guild = await client.guilds.fetch(process.env.GUILD_ID);
+      const channel = await guild.channels.fetch(CONFIG.KILL_LOG_CHANNEL_ID);
+
+      const embed = buildRobloxKillEmbed({
+        victimName,
+        victimUserId,
+        killerName,
+        killerUserId,
+        timeMs,
+      });
+
+      await channel.send({ embeds: [embed] });
+
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      return res.end("Logged");
+    } catch (e) {
+      console.error("Roblox kill log endpoint error:", e);
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      return res.end("Server error");
+    }
+  }
+
+  res.writeHead(404, { "Content-Type": "text/plain" });
+  res.end("Not found");
+});
+
+webServer.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ Listening on port ${PORT}`);
+});
+webServer.on("error", (err) => console.error("❌ HTTP server error:", err));
+
+console.log("✅ index.js started");
+
+/* =========================
    SLASH COMMAND HANDLER
    (deferReply prevents "did not respond")
 ========================= */
@@ -547,12 +656,10 @@ client.on("interactionCreate", async (interaction) => {
       const code = createAuthCode(interaction.user.id, reason);
       const expiresAt = now() + CONFIG.AUTHCODE_TTL_MS;
 
-      // ephemeral to invoker only
       await interaction.editReply(
         `✅ Auth code (expires <t:${Math.floor(expiresAt / 1000)}:R>):\n\`${code}\``
       );
 
-      // log generation
       const embed = buildCardEmbed({
         title: `Auth code generated by ${interaction.user.username}`,
         invokerUser: interaction.user,
@@ -596,7 +703,6 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.editReply("❌ That user is not in this server (or I can’t fetch them).");
       }
 
-      // add role
       await targetMember.roles.add(CONFIG.SPECIAL_ROLE_ID, reason);
 
       const expiresAt = now() + durationMs;
@@ -658,7 +764,6 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // unknown
     await interaction.editReply("❌ Unknown command.");
 
   } catch (err) {
@@ -677,7 +782,6 @@ client.on("interactionCreate", async (interaction) => {
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // start timers
   await enforceExpirations();
   setInterval(enforceExpirations, CONFIG.EXPIRY_CHECK_INTERVAL_MS);
   setInterval(pollAuditLogs, CONFIG.AUDIT_POLL_INTERVAL_MS);
@@ -690,6 +794,8 @@ console.log("DEBUG env set:", {
   DISCORD_TOKEN: !!process.env.DISCORD_TOKEN,
   CLIENT_ID: !!process.env.CLIENT_ID,
   GUILD_ID: !!process.env.GUILD_ID,
+  KILL_LOG_CHANNEL_ID: !!process.env.KILL_LOG_CHANNEL_ID,
+  KILL_LOG_SECRET: !!process.env.KILL_LOG_SECRET,
 });
 
 if (!process.env.DISCORD_TOKEN) {
