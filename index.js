@@ -1,19 +1,20 @@
 /**
- * index.js — Special Perm Bot (Railway-ready) + Logs + Audit Monitoring + Roblox Kill Logs + /klogtest
+ * index.js — Special Perm Bot (Railway-ready) + Logs + Audit Monitoring
+ *         + Roblox Kill Logs + Innocent Kill Channel + ACS Weapon Logging
+ *         + Adonis :give Logs
  *
- * REQUIRED Railway Variables (or local .env):
+ * REQUIRED env (Railway Variables or local .env):
  *   DISCORD_TOKEN
  *   CLIENT_ID
  *   GUILD_ID
  *
- * Roblox kill logs (Railway Variables):
- *   KILL_LOG_CHANNEL_ID
- *   KILL_LOG_INNOCENT_CHANNEL_ID
+ * Roblox security env:
  *   KILL_LOG_SECRET
  *
- * IMPORTANT:
- * - Railway gives PORT automatically; we must listen on it for public domain.
- * - Slash commands must be registered with deploy-commands.js at least once.
+ * Optional env:
+ *   KILL_LOG_CHANNEL_ID              (normal kill logs channel)
+ *   KILL_LOG_INNOCENT_CHANNEL_ID     (innocent kill logs channel)  [hardcoded default below]
+ *   GIVE_LOG_CHANNEL_ID              (give logs channel)           [hardcoded default below]
  */
 
 require("dotenv").config();
@@ -35,17 +36,31 @@ const {
    CONFIG (YOUR IDS)
 ========================= */
 const CONFIG = {
+  // who can generate auth codes
   AUTHCODEGEN_ROLE_IDS: ["1385085079809687714", "1428945562782404718"],
+
+  // role being granted
   SPECIAL_ROLE_ID: "1456387188517372018",
+
+  // who can run grant/revoke
   SERVERPERMS_ALLOWED_ROLE_IDS: ["1456390190951305267"],
 
+  // log channels
   AUTH_LOG_CHANNEL_ID: "1456391810074018023",
   PERM_LOG_CHANNEL_ID: "1456391918383661382",
   SPECIAL_ACTIVITY_LOG_CHANNEL_ID: "1456391963560382647",
 
-  // Roblox kill logs (from env)
+  // Roblox kill logs
   KILL_LOG_CHANNEL_ID: process.env.KILL_LOG_CHANNEL_ID || "1457067040681496647",
-  KILL_LOG_INNOCENT_CHANNEL_ID: process.env.KILL_LOG_INNOCENT_CHANNEL_ID || "1465025859197862098",
+
+  // innocent channel hardcoded default = 1465025859197862098
+  KILL_LOG_INNOCENT_CHANNEL_ID:
+    process.env.KILL_LOG_INNOCENT_CHANNEL_ID || "1465025859197862098",
+
+  // Adonis give logs hardcoded default = 1465034502303781109
+  GIVE_LOG_CHANNEL_ID: process.env.GIVE_LOG_CHANNEL_ID || "1465034502303781109",
+
+  // shared secret for Roblox -> bot HTTP
   KILL_LOG_SECRET: process.env.KILL_LOG_SECRET || "HTILOG_7c9f2a1b4d6e8f0a3c5d7e9f1a2b3c4d",
 
   AUTHCODE_TTL_MS: 60_000,          // 1 minute
@@ -365,7 +380,7 @@ async function pollAuditLogs() {
 }
 
 /* =========================
-   MORE EVENTS (fast, real-time)
+   SPECIAL ACTIVITY EVENTS
 ========================= */
 
 // messages
@@ -485,7 +500,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
   await sendEmbed(guild, CONFIG.SPECIAL_ACTIVITY_LOG_CHANNEL_ID, embed);
 });
 
-// role permission diffs
+// role permission diffs (not special-only; you wanted detailed diffs)
 client.on("roleUpdate", async (oldRole, newRole) => {
   const changes = [];
   if (oldRole.name !== newRole.name) changes.push(`Name: **${oldRole.name}** → **${newRole.name}**`);
@@ -510,7 +525,7 @@ client.on("roleUpdate", async (oldRole, newRole) => {
 });
 
 /* =========================
-   ROBLOX KILL LOG EMBED
+   ROBLOX HELPERS
 ========================= */
 function robloxProfileUrl(userId) {
   return `https://www.roblox.com/users/${userId}/profile`;
@@ -535,7 +550,6 @@ function buildRobloxKillEmbed({
   const victimWeapon = victimHeld || "Unarmed";
   const killerWeapon = killerHeld || "Unarmed";
 
-  // Matches your style: "Player Incident" click → victim profile
   const killedBlock = `Killed User (${victimWeapon})\n[${victimName}](${victimLink}) [Target]`;
   const killerBlock = `[${killerName}](${killerLink}) [Citizen]\nHolding: **${killerWeapon}**`;
 
@@ -556,8 +570,31 @@ function buildRobloxKillEmbed({
     .setTimestamp(new Date(timeMs || Date.now()));
 }
 
+function buildRobloxGiveEmbed({ adminName, adminUserId, targetName, targetUserId, itemName, timeMs, raw }) {
+  const adminLink = robloxProfileUrl(adminUserId);
+  const targetLink = targetUserId ? robloxProfileUrl(targetUserId) : "";
+
+  return new EmbedBuilder()
+    .setColor(0xe53935)
+    .setTitle("Los Santos Give Logs")
+    .setURL(adminLink)
+    .setThumbnail(robloxHeadshotImageUrl(adminUserId))
+    .addFields(
+      { name: "Admin", value: `[${adminName}](${adminLink}) (${adminUserId})`, inline: false },
+      {
+        name: "Target",
+        value: targetUserId ? `[${targetName}](${targetLink}) (${targetUserId})` : `${targetName}`,
+        inline: false,
+      },
+      { name: "Item", value: `**${itemName || "Unknown"}**`, inline: false },
+      { name: "Time", value: `<t:${Math.floor((timeMs || Date.now()) / 1000)}:F>`, inline: false },
+      { name: "Raw", value: `\`${String(raw || "").slice(0, 900)}\``, inline: false }
+    )
+    .setTimestamp(new Date(timeMs || Date.now()));
+}
+
 /* =========================
-   RAILWAY SERVER: /health + /roblox/kill
+   RAILWAY HTTP SERVER
 ========================= */
 const PORT = process.env.PORT || 3000;
 
@@ -571,11 +608,13 @@ function readBody(req) {
 }
 
 const webServer = http.createServer(async (req, res) => {
+  // health
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end("OK");
   }
 
+  // Roblox kill logs
   if (req.method === "POST" && req.url === "/roblox/kill") {
     try {
       if (!CONFIG.KILL_LOG_CHANNEL_ID || !CONFIG.KILL_LOG_SECRET) {
@@ -612,7 +651,6 @@ const webServer = http.createServer(async (req, res) => {
         return res.end("Missing fields");
       }
 
-      // Route to innocent channel if victim DID NOT hit first
       const targetChannelId = victimHitFirst
         ? CONFIG.KILL_LOG_CHANNEL_ID
         : (CONFIG.KILL_LOG_INNOCENT_CHANNEL_ID || CONFIG.KILL_LOG_CHANNEL_ID);
@@ -636,7 +674,66 @@ const webServer = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "text/plain" });
       return res.end("Logged");
     } catch (e) {
-      console.error("Roblox kill log endpoint error:", e);
+      console.error("Roblox /roblox/kill endpoint error:", e);
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      return res.end("Server error");
+    }
+  }
+
+  // Adonis :give logs
+  if (req.method === "POST" && req.url === "/roblox/adonis/give") {
+    try {
+      if (!CONFIG.GIVE_LOG_CHANNEL_ID || !CONFIG.KILL_LOG_SECRET) {
+        res.writeHead(500, { "Content-Type": "text/plain" });
+        return res.end("Give log not configured");
+      }
+
+      const secret = req.headers["x-killlog-secret"];
+      if (secret !== CONFIG.KILL_LOG_SECRET) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        return res.end("Unauthorized");
+      }
+
+      if (!client.isReady()) {
+        res.writeHead(503, { "Content-Type": "text/plain" });
+        return res.end("Bot not ready");
+      }
+
+      const rawBody = await readBody(req);
+      const body = JSON.parse(rawBody || "{}");
+
+      const adminName = String(body.adminName || "").trim();
+      const adminUserId = String(body.adminUserId || "").trim();
+      const targetName = String(body.targetName || "Unknown").trim();
+      const targetUserId = String(body.targetUserId || "").trim();
+      const itemName = String(body.itemName || "Unknown").trim();
+      const timeMs = typeof body.timeMs === "number" ? body.timeMs : Date.now();
+      const raw = String(body.raw || "").trim();
+
+      if (!adminName || !adminUserId) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        return res.end("Missing admin fields");
+      }
+
+      const guild = await client.guilds.fetch(process.env.GUILD_ID);
+      const ch = await guild.channels.fetch(CONFIG.GIVE_LOG_CHANNEL_ID);
+
+      const embed = buildRobloxGiveEmbed({
+        adminName,
+        adminUserId,
+        targetName,
+        targetUserId,
+        itemName,
+        timeMs,
+        raw,
+      });
+
+      await ch.send({ embeds: [embed] });
+
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      return res.end("Logged");
+    } catch (e) {
+      console.error("Roblox /roblox/adonis/give endpoint error:", e);
       res.writeHead(500, { "Content-Type": "text/plain" });
       return res.end("Server error");
     }
@@ -651,7 +748,7 @@ webServer.on("error", (err) => console.error("❌ HTTP server error:", err));
 console.log("✅ index.js started");
 
 /* =========================
-   /klogtest helper (end-to-end)
+   /klogtest internal helper
 ========================= */
 function localKillLogTest() {
   return new Promise((resolve, reject) => {
@@ -663,7 +760,7 @@ function localKillLogTest() {
       timeMs: Date.now(),
       victimHeld: "Unarmed",
       killerHeld: "Test Weapon",
-      victimHitFirst: false, // test the "innocent" route by default
+      victimHitFirst: false, // should go to innocent channel
     });
 
     const req = http.request(
@@ -725,7 +822,7 @@ client.on("interactionCreate", async (interaction) => {
       const result = await localKillLogTest().catch((e) => ({ status: 0, body: String(e) }));
 
       if (result.status === 200) {
-        return interaction.editReply("✅ KLog test worked. (It posts using your /roblox/kill endpoint.)");
+        return interaction.editReply("✅ KLog test worked. Check your kill log channels.");
       }
 
       return interaction.editReply(
@@ -872,14 +969,13 @@ client.once("ready", async () => {
 });
 
 /* =========================
-   LOGIN (with debug)
+   LOGIN (debug)
 ========================= */
 console.log("DEBUG env set:", {
   DISCORD_TOKEN: !!process.env.DISCORD_TOKEN,
   CLIENT_ID: !!process.env.CLIENT_ID,
   GUILD_ID: !!process.env.GUILD_ID,
   KILL_LOG_CHANNEL_ID: !!process.env.KILL_LOG_CHANNEL_ID,
-  KILL_LOG_INNOCENT_CHANNEL_ID: !!process.env.KILL_LOG_INNOCENT_CHANNEL_ID,
   KILL_LOG_SECRET: !!process.env.KILL_LOG_SECRET,
 });
 
