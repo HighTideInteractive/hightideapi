@@ -1,13 +1,14 @@
 /**
- * index.js — Special Perm Bot (Railway-ready) + Logs + Audit Monitoring + Roblox Kill Logs
+ * index.js — Special Perm Bot (Railway-ready) + Logs + Audit Monitoring + Roblox Kill Logs + /klogtest
  *
  * REQUIRED Railway Variables (or local .env):
  *   DISCORD_TOKEN
  *   CLIENT_ID
  *   GUILD_ID
  *
- * NEW Railway Variables for Roblox kill logs:
+ * Roblox kill logs (Railway Variables):
  *   KILL_LOG_CHANNEL_ID
+ *   KILL_LOG_INNOCENT_CHANNEL_ID
  *   KILL_LOG_SECRET
  *
  * IMPORTANT:
@@ -42,9 +43,10 @@ const CONFIG = {
   PERM_LOG_CHANNEL_ID: "1456391918383661382",
   SPECIAL_ACTIVITY_LOG_CHANNEL_ID: "1456391963560382647",
 
-  // Roblox kill logs
-  KILL_LOG_CHANNEL_ID: process.env.KILL_LOG_CHANNEL_ID || "", // set in Railway Variables
-  KILL_LOG_SECRET: process.env.KILL_LOG_SECRET || "", // set in Railway Variables
+  // Roblox kill logs (from env)
+  KILL_LOG_CHANNEL_ID: process.env.KILL_LOG_CHANNEL_ID || "1457067040681496647",
+  KILL_LOG_INNOCENT_CHANNEL_ID: process.env.KILL_LOG_INNOCENT_CHANNEL_ID || "1465025859197862098",
+  KILL_LOG_SECRET: process.env.KILL_LOG_SECRET || "HTILOG_7c9f2a1b4d6e8f0a3c5d7e9f1a2b3c4d",
 
   AUTHCODE_TTL_MS: 60_000,          // 1 minute
   EXPIRY_CHECK_INTERVAL_MS: 10_000, // role expiry check
@@ -334,7 +336,7 @@ async function pollAuditLogs() {
   const logs = await guild.fetchAuditLogs({ limit: 10 }).catch(() => null);
   if (!logs) return;
 
-  const entries = [...logs.entries.values()]; // newest first
+  const entries = [...logs.entries.values()];
   if (!entries.length) return;
 
   const state = readJson(STATE_FILE);
@@ -356,7 +358,7 @@ async function pollAuditLogs() {
   state.lastAuditId = entries[0].id;
   writeJson(STATE_FILE, state);
 
-  newOnes.reverse(); // oldest -> newest
+  newOnes.reverse();
   for (const entry of newOnes) {
     await logAuditEntryIfSpecial(guild, entry);
   }
@@ -508,36 +510,46 @@ client.on("roleUpdate", async (oldRole, newRole) => {
 });
 
 /* =========================
-   ROBLOX KILL LOG HELPERS
+   ROBLOX KILL LOG EMBED
 ========================= */
 function robloxProfileUrl(userId) {
   return `https://www.roblox.com/users/${userId}/profile`;
 }
-
-// This one is a direct image URL (works as Discord thumbnail)
 function robloxHeadshotImageUrl(userId) {
   return `https://www.roblox.com/headshot-thumbnail/image?userId=${userId}&width=150&height=150&format=png`;
 }
 
-function buildRobloxKillEmbed({ victimName, victimUserId, killerName, killerUserId, timeMs }) {
+function buildRobloxKillEmbed({
+  victimName,
+  victimUserId,
+  killerName,
+  killerUserId,
+  timeMs,
+  victimHeld,
+  killerHeld,
+  victimHitFirst,
+}) {
   const victimLink = robloxProfileUrl(victimUserId);
   const killerLink = robloxProfileUrl(killerUserId);
 
-  const killedBlock =
-    `Killed User (Unarmed)\n` +
-    `[${victimName}](${victimLink}) [Target]`;
+  const victimWeapon = victimHeld || "Unarmed";
+  const killerWeapon = killerHeld || "Unarmed";
 
-  const killerBlock =
-    `[${killerName}](${killerLink}) [Citizen]`;
+  // Matches your style: "Player Incident" click → victim profile
+  const killedBlock = `Killed User (${victimWeapon})\n[${victimName}](${victimLink}) [Target]`;
+  const killerBlock = `[${killerName}](${killerLink}) [Citizen]\nHolding: **${killerWeapon}**`;
+
+  const firstHitText = victimHitFirst ? "Victim hit first: **YES**" : "Victim hit first: **NO**";
 
   return new EmbedBuilder()
-    .setColor(0xe53935) // RED like you asked
+    .setColor(0xe53935)
     .setTitle("Los Santos Kill Logs")
-    .setURL(victimLink) // clicking title opens victim profile
+    .setURL(victimLink)
     .setThumbnail(robloxHeadshotImageUrl(victimUserId))
     .addFields(
-      { name: "Game", value: killedBlock, inline: false },
+      { name: "Player Incident", value: killedBlock, inline: false },
       { name: "Killer", value: killerBlock, inline: false },
+      { name: "Context", value: firstHitText, inline: false },
       { name: "Time", value: `<t:${Math.floor((timeMs || Date.now()) / 1000)}:F>`, inline: false }
     )
     .setFooter({ text: `Roblox ID: ${victimUserId}` })
@@ -545,8 +557,7 @@ function buildRobloxKillEmbed({ victimName, victimUserId, killerName, killerUser
 }
 
 /* =========================
-   RAILWAY HEALTH SERVER + ROBLOX ENDPOINT
-   (single server only)
+   RAILWAY SERVER: /health + /roblox/kill
 ========================= */
 const PORT = process.env.PORT || 3000;
 
@@ -560,13 +571,11 @@ function readBody(req) {
 }
 
 const webServer = http.createServer(async (req, res) => {
-  // health check
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end("OK");
   }
 
-  // roblox kill logs
   if (req.method === "POST" && req.url === "/roblox/kill") {
     try {
       if (!CONFIG.KILL_LOG_CHANNEL_ID || !CONFIG.KILL_LOG_SECRET) {
@@ -594,13 +603,22 @@ const webServer = http.createServer(async (req, res) => {
       const killerUserId = String(body.killerUserId || "").trim();
       const timeMs = typeof body.timeMs === "number" ? body.timeMs : Date.now();
 
+      const victimHeld = String(body.victimHeld || "Unarmed").trim();
+      const killerHeld = String(body.killerHeld || "Unarmed").trim();
+      const victimHitFirst = !!body.victimHitFirst;
+
       if (!victimName || !victimUserId || !killerName || !killerUserId) {
         res.writeHead(400, { "Content-Type": "text/plain" });
         return res.end("Missing fields");
       }
 
+      // Route to innocent channel if victim DID NOT hit first
+      const targetChannelId = victimHitFirst
+        ? CONFIG.KILL_LOG_CHANNEL_ID
+        : (CONFIG.KILL_LOG_INNOCENT_CHANNEL_ID || CONFIG.KILL_LOG_CHANNEL_ID);
+
       const guild = await client.guilds.fetch(process.env.GUILD_ID);
-      const channel = await guild.channels.fetch(CONFIG.KILL_LOG_CHANNEL_ID);
+      const channel = await guild.channels.fetch(targetChannelId);
 
       const embed = buildRobloxKillEmbed({
         victimName,
@@ -608,6 +626,9 @@ const webServer = http.createServer(async (req, res) => {
         killerName,
         killerUserId,
         timeMs,
+        victimHeld,
+        killerHeld,
+        victimHitFirst,
       });
 
       await channel.send({ embeds: [embed] });
@@ -625,16 +646,53 @@ const webServer = http.createServer(async (req, res) => {
   res.end("Not found");
 });
 
-webServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Listening on port ${PORT}`);
-});
+webServer.listen(PORT, "0.0.0.0", () => console.log(`✅ Listening on port ${PORT}`));
 webServer.on("error", (err) => console.error("❌ HTTP server error:", err));
-
 console.log("✅ index.js started");
 
 /* =========================
+   /klogtest helper (end-to-end)
+========================= */
+function localKillLogTest() {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({
+      victimName: "roblox_user_testVictim",
+      victimUserId: "12345678",
+      killerName: "roblox_user_testKiller",
+      killerUserId: "87654321",
+      timeMs: Date.now(),
+      victimHeld: "Unarmed",
+      killerHeld: "Test Weapon",
+      victimHitFirst: false, // test the "innocent" route by default
+    });
+
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port: PORT,
+        path: "/roblox/kill",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+          "x-killlog-secret": CONFIG.KILL_LOG_SECRET,
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => resolve({ status: res.statusCode, body: data }));
+      }
+    );
+
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+/* =========================
    SLASH COMMAND HANDLER
-   (deferReply prevents "did not respond")
 ========================= */
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
@@ -646,7 +704,36 @@ client.on("interactionCreate", async (interaction) => {
     const guild = interaction.guild;
     const invoker = await guild.members.fetch(interaction.user.id);
 
-    // /authcodegen reason
+    // /klogtest
+    if (interaction.commandName === "klogtest") {
+      if (!CONFIG.KILL_LOG_CHANNEL_ID || !CONFIG.KILL_LOG_SECRET) {
+        return interaction.editReply(
+          "❌ Kill logs not configured.\nSet `KILL_LOG_CHANNEL_ID` + `KILL_LOG_SECRET` in Railway Variables."
+        );
+      }
+
+      const chNormal = await guild.channels.fetch(CONFIG.KILL_LOG_CHANNEL_ID).catch(() => null);
+      if (!chNormal) return interaction.editReply("❌ Kill log channel not found. Check `KILL_LOG_CHANNEL_ID`.");
+
+      const me = await guild.members.fetch(client.user.id);
+      const perms = chNormal.permissionsFor(me);
+
+      if (!perms?.has(PermissionsBitField.Flags.SendMessages) || !perms?.has(PermissionsBitField.Flags.EmbedLinks)) {
+        return interaction.editReply("❌ I need Send Messages + Embed Links in the kill log channel.");
+      }
+
+      const result = await localKillLogTest().catch((e) => ({ status: 0, body: String(e) }));
+
+      if (result.status === 200) {
+        return interaction.editReply("✅ KLog test worked. (It posts using your /roblox/kill endpoint.)");
+      }
+
+      return interaction.editReply(
+        `❌ KLog test failed.\nHTTP: **${result.status}**\nReply: \`${String(result.body).slice(0, 150)}\``
+      );
+    }
+
+    // /authcodegen
     if (interaction.commandName === "authcodegen") {
       if (!memberHasAnyRole(invoker, CONFIG.AUTHCODEGEN_ROLE_IDS)) {
         return interaction.editReply("❌ You don’t have permission to generate auth codes.");
@@ -656,9 +743,7 @@ client.on("interactionCreate", async (interaction) => {
       const code = createAuthCode(interaction.user.id, reason);
       const expiresAt = now() + CONFIG.AUTHCODE_TTL_MS;
 
-      await interaction.editReply(
-        `✅ Auth code (expires <t:${Math.floor(expiresAt / 1000)}:R>):\n\`${code}\``
-      );
+      await interaction.editReply(`✅ Auth code (expires <t:${Math.floor(expiresAt / 1000)}:R>):\n\`${code}\``);
 
       const embed = buildCardEmbed({
         title: `Auth code generated by ${interaction.user.username}`,
@@ -673,7 +758,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // /serverpermissions userid authcode reason time
+    // /serverpermissions
     if (interaction.commandName === "serverpermissions") {
       if (!memberHasAnyRole(invoker, CONFIG.SERVERPERMS_ALLOWED_ROLE_IDS)) {
         return interaction.editReply("❌ You don’t have permission to grant/revoke.");
@@ -728,7 +813,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // /revokepermissions userid reason
+    // /revokepermissions
     if (interaction.commandName === "revokepermissions") {
       if (!memberHasAnyRole(invoker, CONFIG.SERVERPERMS_ALLOWED_ROLE_IDS)) {
         return interaction.editReply("❌ You don’t have permission to grant/revoke.");
@@ -765,7 +850,6 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     await interaction.editReply("❌ Unknown command.");
-
   } catch (err) {
     console.error("Slash command error:", err);
     if (interaction.deferred || interaction.replied) {
@@ -788,13 +872,14 @@ client.once("ready", async () => {
 });
 
 /* =========================
-   LOGIN (with loud debug)
+   LOGIN (with debug)
 ========================= */
 console.log("DEBUG env set:", {
   DISCORD_TOKEN: !!process.env.DISCORD_TOKEN,
   CLIENT_ID: !!process.env.CLIENT_ID,
   GUILD_ID: !!process.env.GUILD_ID,
   KILL_LOG_CHANNEL_ID: !!process.env.KILL_LOG_CHANNEL_ID,
+  KILL_LOG_INNOCENT_CHANNEL_ID: !!process.env.KILL_LOG_INNOCENT_CHANNEL_ID,
   KILL_LOG_SECRET: !!process.env.KILL_LOG_SECRET,
 });
 

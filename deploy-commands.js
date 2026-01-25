@@ -48,6 +48,10 @@ const commands = [
     .addStringOption((o) =>
       o.setName("reason").setDescription("Reason").setRequired(true)
     ),
+
+  new SlashCommandBuilder()
+    .setName("klogtest")
+    .setDescription("Test Roblox kill log endpoint + posting to the kill log channel"),
 ].map((c) => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(token);
